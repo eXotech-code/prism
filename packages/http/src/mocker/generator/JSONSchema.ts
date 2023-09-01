@@ -61,11 +61,97 @@ export function resetGenerator() {
 
 resetGenerator();
 
+class ExtendedSourceSchemaParseError extends Error {}
+
+class StaticStringGenerator {
+	constrcutor(val: string) { this.val = val };
+}
+
+class IncrementalIntGenerator {
+	constructor(counter = 0) { this.counter = counter };
+
+	get val() {
+		return counter++;
+	}
+}
+
+class SumToNGenerator {
+	constructor(n: number) { this.n = n };
+
+	randInt(max: number) {
+		return Math.round(Math.random() * max);
+	}
+
+	get val() {
+		const newNumber = this.randInt(n);
+		n -= newNumber;
+		return newNumber;
+	}
+}
+
+class ValueHolderGenerator {
+	constructor(val: number) { this.val = val };
+}
+
+class GeneratorOpt {
+	constructor(option: string[]) { this.option = option };
+
+	get generator() {
+		const generators = {
+			"const": StaticStringGenerator,
+			"incremental": IncrementalIntGenerator,
+			"sum": SumToNGenerator,
+			"val": ValueHolderGenerator
+		}
+
+		return generators[this.option[0]];
+	}
+}
+
+/* Builds an object filled with generator options.
+ * This is used later by the function that assigns generators
+ * to properties. */
+const buildScaffold = (source: JSONSchema): JSONValue => {
+	const option = source["x-generator-opt"]?.split(" ");
+	switch (source.type) {
+		case "object":
+			let props = {};
+			for (const property in source.properties) {
+				props[property] = buildScaffold(source.properties[property]);
+			}
+			return props;
+		case "array":
+			if (!option) throw GeneratorError("Encountered array property with unspecified size.");
+			const arraySize = parseInt(option[1]);
+			return Array(arraySize).fill(buildScaffold(source.items));
+		default:
+			return option ? new GeneratorOpt(option) : null;
+	}
+}
+
+const addGenerators = (scaffold: JSONValue, propName: string, parent: JSONValue = null): JSONValue => {
+	if (Array.isArray(scaffold)) {
+		for (const element of scaffold) {
+			addGenerators(element, propName, scaffold);
+		}
+	} else if (scaffold instanceof GeneratorOpt) {
+		const generator = scaffold.generator;
+		console.log("GENERATOR", generator);
+	} else if (scaffold) {
+		// This is an object.
+		for (const prop in scaffold) {
+			addGenerators(scaffold[prop], prop, scaffold);
+		}
+	}
+}
+
 export function generate(
   resource: IHttpOperation | IHttpParam | IHttpContent,
   bundle: unknown,
   source: JSONSchema
 ): Either<Error, unknown> {
+  addGenerators(buildScaffold(source));
+
   return pipe(
     stripWriteOnlyProperties(source),
     E.fromOption(() => Error('Cannot strip writeOnly properties')),

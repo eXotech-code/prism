@@ -64,7 +64,9 @@ resetGenerator();
 class ExtendedSourceSchemaParseError extends Error {}
 
 class StaticStringGenerator {
-	constrcutor(val: string) { this.val = val };
+	constructor() { this.val = null };
+	
+	assignValue(val: string) { this.val = val };
 }
 
 class IncrementalIntGenerator {
@@ -93,10 +95,12 @@ class ValueHolderGenerator {
 	constructor(val: number) { this.val = val };
 }
 
+type Generator = StaticStringGenerator | IncrementalIntGenerator | SumToNGenerator | ValueHolderGenerator;
+
 class GeneratorOpt {
 	constructor(option: string[]) { this.option = option };
 
-	get generator() {
+	get generator(): Generator {
 		const generators = {
 			"const": StaticStringGenerator,
 			"incremental": IncrementalIntGenerator,
@@ -121,7 +125,7 @@ const buildScaffold = (source: JSONSchema): JSONValue => {
 			}
 			return props;
 		case "array":
-			if (!option) throw GeneratorError("Encountered array property with unspecified size.");
+			if (!option) throw ExtendedSourceSchemaParseError("Encountered array property with unspecified size.");
 			const arraySize = parseInt(option[1]);
 			return Array(arraySize).fill(buildScaffold(source.items));
 		default:
@@ -129,18 +133,61 @@ const buildScaffold = (source: JSONSchema): JSONValue => {
 	}
 }
 
-const addGenerators = (scaffold: JSONValue, propName: string, parent: JSONValue = null): JSONValue => {
+type Nullable<Type> = Type | null;
+
+class ContextShard {
+	constructor(parent: Nullable<ContextShard>, currentLevel: JSONValue) {
+		this.parent = parent;
+		this.currentLevel = currentLevel;
+	}
+}
+
+const placeGenerator = (generatorOpt: GeneratorOpt, propName: string, context: ContextShard) => {
+	const generator = generatorOpt.generator;
+	switch (generator) {
+		case IncrementalIntGenerator: {
+			const parentArray = context.parent.parent.currentLevel;
+			const sharedGenerator = new generator();
+			for (let i = 0; i < parentArray.length; i++) {
+				parentArray[i][propName] = sharedGenerator;
+			}
+			break;
+		}
+		case ValueHolderGenerator: {
+			const valueHolder = new generator(parseInt(generatorOpt.option[2]));
+			const props = context.parent.currentLevel;
+			const sharedGenerator = new SumToNGenerator(valueHolder.val);
+			const keysToFill = Object.keys(props).filter(key => props[key].option[2].slice(1, -1) === generatorOpt.option[1]);
+			for (const key of keysToFill) {
+				props[key] = sharedGenerator;
+			}
+			props[propName] = null;
+			break;
+		}
+		case StaticStringGenerator:
+			context.parent.currentLevel[propName] = new generator();
+			break;
+		default:
+			throw new ExtendedSourceSchemaParseError(`Encountered unhandled generator type (${generator.name}).`);
+			break;
+	}
+}
+
+const addGenerators = (scaffold: JSONValue, propName: string, context: ContextShard = null): JSONValue => {
+	if (!context) {
+		context = new ContextShard(null, scaffold);
+	}
+
 	if (Array.isArray(scaffold)) {
 		for (const element of scaffold) {
-			addGenerators(element, propName, scaffold);
+			addGenerators(element, propName, new ContextShard(context, element));
 		}
 	} else if (scaffold instanceof GeneratorOpt) {
-		const generator = scaffold.generator;
-		console.log("GENERATOR", generator);
+		placeGenerator(scaffold, propName, context);
 	} else if (scaffold) {
 		// This is an object.
 		for (const prop in scaffold) {
-			addGenerators(scaffold[prop], prop, scaffold);
+			addGenerators(scaffold[prop], prop, new ContextShard(context, scaffold[prop]));
 		}
 	}
 }
@@ -150,7 +197,8 @@ export function generate(
   bundle: unknown,
   source: JSONSchema
 ): Either<Error, unknown> {
-  addGenerators(buildScaffold(source));
+  const scaffold = buildScaffold(source);
+  addGenerators(scaffold);
 
   return pipe(
     stripWriteOnlyProperties(source),
